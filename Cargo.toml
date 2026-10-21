@@ -1,0 +1,52 @@
+[package]
+name = "radial-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny always-on radial app launcher for Windows (hold Shift + Middle mouse button)"
+license = "MIT"
+
+[lib]
+name = "radial_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "radial-launcher"
+path = "src/main.rs"
+
+[dependencies]
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+fontdue = { version = "0.9", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Environment",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[dev-dependencies]
+# Only used by examples/preview.rs to write a PNG; not part of the shipped exe.
+tiny-skia = { version = "0.11", features = ["png-format"] }
+
+[profile.release]
+opt-level = "z"        # small binary
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Keep the rasteriser fast even though everything else is size-optimised.
+[profile.release.package.tiny-skia]
+opt-level = 3

@@ -13,7 +13,7 @@ pub const WM_TRAY: u32 = WM_APP + 20;
 const TRAY_ID: u32 = 1;
 
 pub const CMD_ENABLED: u32 = 1;
-pub const CMD_EDIT: u32 = 2;
+pub const CMD_SETTINGS: u32 = 2;
 pub const CMD_RELOAD: u32 = 3;
 pub const CMD_AUTOSTART: u32 = 4;
 pub const CMD_QUIT: u32 = 5;
@@ -124,7 +124,7 @@ pub unsafe fn show_menu(hwnd: HWND, enabled: bool, autostart: bool) -> u32 {
     item(CMD_ENABLED, "Enabled", enabled);
     item(CMD_AUTOSTART, "Start with Windows", autostart);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    item(CMD_EDIT, "Edit config...", false);
+    item(CMD_SETTINGS, "Settings...", false);
     item(CMD_RELOAD, "Reload config", false);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     item(CMD_QUIT, "Quit", false);

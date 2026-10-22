@@ -38,7 +38,16 @@ fn main() {
     // Composite over a mid-grey "desktop" so the translucency is visible.
     for (name, hovered) in [("idle", None), ("hover", Some(2usize))] {
         let mut wheel_px = Pixmap::new(lay.size, lay.size).unwrap();
-        wheel::render(&mut wheel_px, &lay, &items, hovered, accent);
+        wheel::render(
+            &mut wheel_px,
+            &lay,
+            &items,
+            hovered,
+            accent,
+            cfg.wheel_rgb(),
+            cfg.hub_rgb(),
+            &cfg.design,
+        );
         let mut bg = Pixmap::new(lay.size, lay.size).unwrap();
         bg.fill(Color::from_rgba8(70, 86, 110, 255));
         bg.draw_pixmap(

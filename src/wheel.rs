@@ -48,7 +48,19 @@ impl Layout {
     /// wheel centre in pixels (y grows downwards). Slice 0 is centred at 12 o'clock
     /// and slices run clockwise. Inside the hub there is no selection (cancel zone).
     pub fn hit_test(&self, dx: f32, dy: f32, n: usize) -> Option<usize> {
-        if n == 0 || dx * dx + dy * dy < self.r_in * self.r_in {
+        self.hit_test_design(dx, dy, n, "segments")
+    }
+
+    pub fn hit_test_design(&self, dx: f32, dy: f32, n: usize, design: &str) -> Option<usize> {
+        let hub_r = match design {
+            "band" => self.r_out * 0.50,
+            "halo" => self.r_out * 0.64,
+            "arc" => self.r_out * 0.55,
+            "disc" => self.r_out * 0.18,
+            "orbs" => self.r_out * 0.63,
+            _ => self.r_in,
+        };
+        if n == 0 || dx * dx + dy * dy < hub_r * hub_r {
             return None;
         }
         if n == 1 {
@@ -132,6 +144,9 @@ pub fn render(
     items: &[WheelItem],
     hovered: Option<usize>,
     accent: [u8; 3],
+    wheel_color: [u8; 3],
+    hub_color: [u8; 3],
+    design: &str,
 ) {
     pm.fill(Color::TRANSPARENT);
     let n = items.len();
@@ -141,33 +156,70 @@ pub fn render(
     let s = lay.scale;
     let c = lay.centre();
     let sweep = TAU / n as f32;
-    let gap = if n > 1 { 2.4_f32.to_radians() } else { 0.0 };
+    let gap = if n > 1 {
+        match design {
+            "arc" => 6.0_f32.to_radians(),
+            "halo" => 4.0_f32.to_radians(),
+            _ => 2.4_f32.to_radians(),
+        }
+    } else {
+        0.0
+    };
+    let inner = match design {
+        "band" => lay.r_out * 0.50,
+        "halo" => lay.r_out * 0.64,
+        "arc" => lay.r_out * 0.55,
+        "disc" => lay.r_out * 0.10,
+        _ => lay.r_in,
+    };
+    let outer = match design {
+        "band" => lay.r_out * 0.88,
+        "halo" => lay.r_out * 0.98,
+        "arc" => lay.r_out * 0.92,
+        _ => lay.r_out,
+    };
 
     for (i, item) in items.iter().enumerate() {
         let mid = -FRAC_PI_2 + i as f32 * sweep;
         let hot = hovered == Some(i);
-        let r1 = if hot { lay.r_out + 8.0 * s } else { lay.r_out };
+        let r1 = if hot { outer + 8.0 * s } else { outer };
         let (a0, a1) = (mid - sweep / 2.0 + gap / 2.0, mid + sweep / 2.0 - gap / 2.0);
 
-        if let Some(path) = sector(c, c, lay.r_in, r1, a0, a1) {
-            let base = if hot {
-                [accent[0], accent[1], accent[2], 238]
-            } else {
-                [22, 24, 30, 214]
+        if design == "orbs" {
+            let orbit = lay.r_out * 0.77;
+            let (px, py) = (c + orbit * mid.cos(), c + orbit * mid.sin());
+            let radius = (lay.r_out * 0.14).min(38.0 * s);
+            if let Some(node) = PathBuilder::from_circle(px, py, radius + if hot { 4.0 * s } else { 0.0 }) {
+                let color = if hot { accent } else { wheel_color };
+                fill(pm, &node, [color[0], color[1], color[2], 230]);
+                outline(&mut *pm, &node, [255, 255, 255, if hot { 110 } else { 48 }], 1.2 * s);
+            }
+        } else if let Some(path) = sector(c, c, inner, r1, a0, a1) {
+            let alpha = match design {
+                "halo" => 150,
+                "disc" => 232,
+                _ => 214,
             };
-            fill(pm, &path, base);
-            outline(
-                pm,
-                &path,
-                [255, 255, 255, if hot { 96 } else { 34 }],
-                1.0 * s,
-            );
+            let color = if hot { accent } else { wheel_color };
+            fill(pm, &path, [color[0], color[1], color[2], if hot { 238 } else { alpha }]);
+            let outline_alpha = if design == "halo" { 110 } else if hot { 96 } else { 34 };
+            outline(pm, &path, [255, 255, 255, outline_alpha], if design == "halo" { 2.0 * s } else { 1.0 * s });
         }
 
         // Icon, centred in the slice.
-        let rm = (lay.r_in + lay.r_out) / 2.0;
+        let rm = if design == "disc" {
+            lay.r_out * 0.55
+        } else if design == "orbs" {
+            lay.r_out * 0.77
+        } else {
+            (inner + outer) / 2.0
+        };
         let (px, py) = (c + rm * mid.cos(), c + rm * mid.sin());
-        let target = ((lay.r_out - lay.r_in) * 0.56).min(60.0 * s);
+        let target = if design == "orbs" {
+            ((lay.r_out - lay.r_in) * 0.56).min(48.0 * s)
+        } else {
+            ((outer - inner) * 0.56).min(60.0 * s)
+        };
         let k = target / ICON_PX as f32 * if hot { 1.14 } else { 1.0 };
         let half = ICON_PX as f32 * k / 2.0;
         let paint = PixmapPaint {
@@ -186,9 +238,16 @@ pub fn render(
     }
 
     // Centre hub: shows the hovered app's name, or a dot when nothing is selected.
-    let hub_r = lay.r_in - 6.0 * s;
+    let hub_r = match design {
+        "band" => lay.r_out * 0.46,
+        "halo" => lay.r_out * 0.60,
+        "arc" => lay.r_out * 0.51,
+        "disc" => lay.r_out * 0.18,
+        "orbs" => lay.r_out * 0.50,
+        _ => lay.r_in - 6.0 * s,
+    };
     if let Some(circle) = PathBuilder::from_circle(c, c, hub_r) {
-        fill(pm, &circle, [16, 17, 21, 230]);
+        fill(pm, &circle, [hub_color[0], hub_color[1], hub_color[2], 230]);
         outline(pm, &circle, [255, 255, 255, 40], 1.0 * s);
     }
     match hovered.and_then(|i| items[i].label.as_ref()) {
@@ -259,6 +318,14 @@ mod tests {
     }
 
     #[test]
+    fn hit_test_hub_matches_disc_design() {
+        let l = lay();
+        let radius = l.r_out * 0.2;
+        assert_eq!(l.hit_test_design(0.0, -radius, 8, "segments"), None);
+        assert_eq!(l.hit_test_design(0.0, -radius, 8, "disc"), Some(0));
+    }
+
+    #[test]
     fn eight_slices_run_clockwise_from_the_top() {
         let l = lay();
         let d = 150.0;
@@ -309,10 +376,64 @@ mod tests {
             .collect();
         let mut a = Pixmap::new(l.size, l.size).unwrap();
         let mut b = Pixmap::new(l.size, l.size).unwrap();
-        render(&mut a, &l, &items, None, [76, 154, 255]);
-        render(&mut b, &l, &items, Some(2), [76, 154, 255]);
+        render(
+            &mut a,
+            &l,
+            &items,
+            None,
+            [76, 154, 255],
+            [22, 24, 30],
+            [16, 17, 21],
+            "segments",
+        );
+        render(
+            &mut b,
+            &l,
+            &items,
+            Some(2),
+            [76, 154, 255],
+            [22, 24, 30],
+            [16, 17, 21],
+            "segments",
+        );
         assert!(a.pixels().iter().any(|p| p.alpha() > 0));
         assert_ne!(a.data(), b.data());
+    }
+
+    #[test]
+    fn all_six_designs_render_distinct_shapes() {
+        let l = lay();
+        let items: Vec<WheelItem> = (0..8)
+            .map(|_| WheelItem {
+                icon: Pixmap::new(ICON_PX, ICON_PX).unwrap(),
+                label: None,
+            })
+            .collect();
+        let mut segment = Pixmap::new(l.size, l.size).unwrap();
+        render(
+            &mut segment,
+            &l,
+            &items,
+            None,
+            [76, 154, 255],
+            [22, 24, 30],
+            [16, 17, 21],
+            "segments",
+        );
+        for design in ["band", "orbs", "halo", "arc", "disc"] {
+            let mut image = Pixmap::new(l.size, l.size).unwrap();
+            render(
+                &mut image,
+                &l,
+                &items,
+                None,
+                [76, 154, 255],
+                [22, 24, 30],
+                [16, 17, 21],
+                design,
+            );
+            assert_ne!(segment.data(), image.data(), "{design} matches segments");
+        }
     }
 
     #[test]

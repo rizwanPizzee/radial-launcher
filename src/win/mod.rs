@@ -2,8 +2,8 @@
 //!
 //! Threads: the UI thread (this file) owns the overlay window and all state; the
 //! hook thread (`hook.rs`) only posts messages to it. While idle the UI thread
-//! sits in `GetMessageW` (0 % CPU) and holds only the config and small icon bitmaps;
-//! the render buffers exist only while the wheel is on screen.
+//! sits in `GetMessageW` (0 % CPU) and holds only configuration; icons and render
+//! buffers are loaded only while the wheel is open.
 
 mod autostart;
 mod hook;
@@ -13,7 +13,7 @@ mod util;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use radial_launcher::config::{self, Config};
@@ -25,10 +25,10 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CloseHandle, CreateMutexW, GetProcessId, WaitForInputIdle};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use hook::*;
@@ -36,12 +36,14 @@ use util::{message_box, wide};
 
 const TIMER_FADE: usize = 1;
 const TIMER_KEYS: usize = 2;
+const WM_RELOAD_CONFIG: u32 = WM_APP + 21;
 /// Releasing the middle button sooner than this keeps the wheel open ("click mode").
 const TAP_MS: u128 = 250;
 /// Safety net: a wheel left open this long closes itself.
 const MAX_OPEN: Duration = Duration::from_secs(60);
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static LAUNCHED_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 struct Open {
     lay: Layout,
@@ -101,12 +103,11 @@ pub fn run() {
                 Config::default()
             }
         };
-        let items = build_items(&cfg);
         let accent = cfg.accent_rgb();
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 cfg,
-                items,
+                items: Vec::new(),
                 open: None,
             })
         });
@@ -190,7 +191,7 @@ fn build_items(cfg: &Config) -> Vec<WheelItem> {
 // ---------------------------------------------------------------- wheel lifecycle
 
 unsafe fn open_wheel(app: &mut App, hwnd: HWND) {
-    if app.items.is_empty() || app.open.is_some() {
+    if app.cfg.items.is_empty() || app.open.is_some() {
         if app.open.is_none() {
             ACTIVE.store(false, Relaxed);
         }
@@ -275,10 +276,11 @@ unsafe fn open_wheel(app: &mut App, hwnd: HWND) {
         alpha: 0,
     };
 
+    app.items = build_items(&app.cfg);
     if screen_mode {
         let _ = SetCursorPos(centre.x, centre.y);
     }
-    redraw(&mut open, &app.items, app.cfg.accent_rgb());
+    redraw(&mut open, &app.items, &app.cfg);
     commit(hwnd, &open);
     let _ = SetWindowPos(
         hwnd,
@@ -295,8 +297,17 @@ unsafe fn open_wheel(app: &mut App, hwnd: HWND) {
 }
 
 /// Render the wheel into the DIB.
-unsafe fn redraw(o: &mut Open, items: &[WheelItem], accent: [u8; 3]) {
-    wheel::render(&mut o.pm, &o.lay, items, o.hovered, accent);
+unsafe fn redraw(o: &mut Open, items: &[WheelItem], cfg: &Config) {
+    wheel::render(
+        &mut o.pm,
+        &o.lay,
+        items,
+        o.hovered,
+        cfg.accent_rgb(),
+        cfg.wheel_rgb(),
+        cfg.hub_rgb(),
+        &cfg.design,
+    );
     let n = (o.lay.size * o.lay.size * 4) as usize;
     let dst = std::slice::from_raw_parts_mut(o.bits, n);
     for (s, d) in o.pm.data().chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
@@ -348,50 +359,96 @@ unsafe fn close_wheel(app: &mut App, hwnd: HWND, launch: bool) {
         let _ = SetCursorPos(p.x, p.y);
     }
     ACTIVE.store(false, Relaxed);
+    app.items.clear();
 
     if launch {
         if let Some(item) = o.hovered.and_then(|i| app.cfg.items.get(i)) {
-            launch_item(&item.path, &item.args);
+            launch_item(&item.path, &item.args, app.cfg.focus_app);
         }
     }
     // `o.pm` (the render buffer) is dropped here.
 }
 
-fn launch_item(path: &str, args: &str) {
+unsafe extern "system" fn find_process_window(hwnd: HWND, process: LPARAM) -> BOOL {
+    let mut process_id = 0;
+    GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    if process_id as isize == process.0 && IsWindowVisible(hwnd).as_bool() {
+        let owner = GetWindow(hwnd, GW_OWNER);
+        if owner.0.is_null() {
+            LAUNCHED_WINDOW.store(hwnd.0 as isize, Relaxed);
+            return false.into();
+        }
+    }
+    true.into()
+}
+
+fn launch_item(path: &str, args: &str, focus_app: bool) {
     unsafe {
         // Let the program we are about to start take the foreground.
         let _ = AllowSetForegroundWindow(ASFW_ANY);
         let file = wide(&icons::expand(path));
         let params = wide(&icons::expand(args));
-        let result = ShellExecuteW(
-            None,
-            w!("open"),
-            PCWSTR(file.as_ptr()),
-            if args.trim().is_empty() {
+        let mut execute = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: w!("open"),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: if args.trim().is_empty() {
                 PCWSTR::null()
             } else {
                 PCWSTR(params.as_ptr())
             },
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-        // ShellExecute reports failure with a value <= 32.
-        if (result.0 as isize) <= 32 {
-            message_box("Radial Launcher", &format!("Could not launch:\n{path}"));
+            nShow: SW_SHOWNORMAL,
+            ..Default::default()
+        };
+        if !ShellExecuteExW(&mut execute).as_bool() {
+            message_box(
+                "Radial Launcher",
+                &format!("Could not launch:\n{path}\n\nWindows error: {}", GetLastError().0),
+            );
+            return;
+        }
+        if !execute.hProcess.is_invalid() {
+            if focus_app {
+                let _ = WaitForInputIdle(execute.hProcess, 3000);
+                let process_id = GetProcessId(execute.hProcess);
+                if process_id != 0 {
+                    let _ = AllowSetForegroundWindow(process_id);
+                    LAUNCHED_WINDOW.store(0, Relaxed);
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while Instant::now() < deadline {
+                        let _ = EnumWindows(
+                            Some(find_process_window),
+                            LPARAM(process_id as isize),
+                        );
+                        let window = LAUNCHED_WINDOW.load(Relaxed);
+                        if window != 0 {
+                            let window = HWND(window as *mut c_void);
+                            let _ = ShowWindow(window, SW_RESTORE);
+                            let _ = SetForegroundWindow(window);
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            }
+            let _ = CloseHandle(execute.hProcess);
         }
     }
 }
 
 unsafe fn on_move(app: &mut App, hwnd: HWND, x: i32, y: i32) {
     let n = app.items.len();
-    let accent = app.cfg.accent_rgb();
     let Some(o) = app.open.as_mut() else { return };
-    let hit = o
-        .lay
-        .hit_test((x - o.centre.x) as f32, (y - o.centre.y) as f32, n);
+    let hit = o.lay.hit_test_design(
+        (x - o.centre.x) as f32,
+        (y - o.centre.y) as f32,
+        n,
+        &app.cfg.design,
+    );
     if hit != o.hovered {
         o.hovered = hit;
-        redraw(o, &app.items, accent);
+        redraw(o, &app.items, &app.cfg);
         commit(hwnd, o);
     }
 }
@@ -430,14 +487,16 @@ unsafe fn on_timer(app: &mut App, hwnd: HWND, id: usize) {
 unsafe fn reload_config(hwnd: HWND) {
     match config::load_or_create() {
         Ok(cfg) => {
-            let items = build_items(&cfg);
+            let accent = cfg.accent_rgb();
             with_app(|app| {
                 if app.open.is_some() {
                     close_wheel(app, hwnd, false);
                 }
                 app.cfg = cfg;
-                app.items = items;
+                app.items.clear();
             });
+            tray::remove(hwnd);
+            tray::add(hwnd, accent);
         }
         Err(e) => message_box(
             "Radial Launcher - config error",
@@ -446,17 +505,18 @@ unsafe fn reload_config(hwnd: HWND) {
     }
 }
 
-unsafe fn edit_config() {
-    let path = config::config_path();
-    let args = wide(&format!("\"{}\"", path.display()));
-    ShellExecuteW(
-        None,
-        w!("open"),
-        w!("notepad.exe"),
-        PCWSTR(args.as_ptr()),
-        PCWSTR::null(),
-        SW_SHOWNORMAL,
-    );
+unsafe fn open_settings() {
+    let settings_exe = std::env::current_exe()
+        .map(|exe| exe.with_file_name("radial-launcher-settings.exe"));
+    match settings_exe.and_then(|exe| std::process::Command::new(exe).spawn()) {
+        Ok(_) => {}
+        Err(e) => message_box(
+            "Radial Launcher",
+            &format!(
+                "Could not open Radial Launcher Settings.\nMake sure radial-launcher-settings.exe is next to radial-launcher.exe.\n\n{e}"
+            ),
+        ),
+    }
 }
 
 unsafe fn on_tray(hwnd: HWND, lparam: LPARAM) {
@@ -479,7 +539,7 @@ unsafe fn on_tray(hwnd: HWND, lparam: LPARAM) {
                 message_box("Radial Launcher", "Could not change the startup setting.");
             }
         }
-        tray::CMD_EDIT => edit_config(),
+        tray::CMD_SETTINGS => open_settings(),
         tray::CMD_RELOAD => reload_config(hwnd),
         tray::CMD_QUIT => {
             let _ = DestroyWindow(hwnd);
@@ -521,6 +581,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         tray::WM_TRAY => {
             on_tray(hwnd, lparam);
+            LRESULT(0)
+        }
+        WM_RELOAD_CONFIG => {
+            reload_config(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {

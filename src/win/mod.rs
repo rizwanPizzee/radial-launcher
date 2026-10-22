@@ -25,7 +25,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{CloseHandle, CreateMutexW, GetProcessId, WaitForInputIdle};
+use windows::Win32::System::Threading::{CreateMutexW, GetProcessId, WaitForInputIdle};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS};
@@ -373,8 +373,10 @@ unsafe extern "system" fn find_process_window(hwnd: HWND, process: LPARAM) -> BO
     let mut process_id = 0;
     GetWindowThreadProcessId(hwnd, Some(&mut process_id));
     if process_id as isize == process.0 && IsWindowVisible(hwnd).as_bool() {
-        let owner = GetWindow(hwnd, GW_OWNER);
-        if owner.0.is_null() {
+        let is_unowned = GetWindow(hwnd, GW_OWNER)
+            .map(|owner| owner.0.is_null())
+            .unwrap_or(false);
+        if is_unowned {
             LAUNCHED_WINDOW.store(hwnd.0 as isize, Relaxed);
             return false.into();
         }
@@ -398,10 +400,10 @@ fn launch_item(path: &str, args: &str, focus_app: bool) {
             } else {
                 PCWSTR(params.as_ptr())
             },
-            nShow: SW_SHOWNORMAL,
+            nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
-        if !ShellExecuteExW(&mut execute).as_bool() {
+        if ShellExecuteExW(&mut execute).is_err() {
             message_box(
                 "Radial Launcher",
                 &format!("Could not launch:\n{path}\n\nWindows error: {}", GetLastError().0),

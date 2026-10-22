@@ -35,7 +35,7 @@ fn control(
     parent: HWND,
     class: PCWSTR,
     text: &str,
-    style: WINDOW_STYLE,
+    style: u32,
     x: i32,
     y: i32,
     width: i32,
@@ -48,14 +48,17 @@ fn control(
             WINDOW_EX_STYLE(0),
             class,
             PCWSTR(text.as_ptr()),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(style),
             x,
             y,
             width,
             height,
             parent,
             HMENU(id as *mut c_void),
-            GetModuleHandleW(None).map(Into::into).unwrap_or_default(),
+            {
+                let instance: HINSTANCE = GetModuleHandleW(None).map(Into::into).unwrap_or_default();
+                instance
+            },
             None,
         )
         .unwrap_or_default()
@@ -67,7 +70,7 @@ fn label(parent: HWND, text: &str, x: i32, y: i32, width: i32) {
         parent,
         w!("STATIC"),
         text,
-        WINDOW_STYLE(0),
+        0,
         x,
         y,
         width,
@@ -79,14 +82,18 @@ fn label(parent: HWND, text: &str, x: i32, y: i32, width: i32) {
 fn set_text(parent: HWND, id: i32, value: &str) {
     let value = wide(value);
     unsafe {
-        let _ = SetWindowTextW(GetDlgItem(parent, id), PCWSTR(value.as_ptr()));
+        let _ = SetWindowTextW(dialog_item(parent, id), PCWSTR(value.as_ptr()));
     }
+}
+
+fn dialog_item(parent: HWND, id: i32) -> HWND {
+    unsafe { GetDlgItem(parent, id).expect("settings control was not created") }
 }
 
 fn text(parent: HWND, id: i32) -> String {
     let mut value = vec![0u16; 4096];
     unsafe {
-        let len = GetWindowTextW(GetDlgItem(parent, id), &mut value);
+        let len = GetWindowTextW(dialog_item(parent, id), &mut value);
         String::from_utf16_lossy(&value[..len.max(0) as usize])
     }
 }
@@ -96,7 +103,7 @@ fn combo(parent: HWND, id: i32, x: i32, y: i32, width: i32, entries: &[&str], se
         parent,
         w!("COMBOBOX"),
         "",
-        WS_VSCROLL | CBS_DROPDOWNLIST,
+        WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32,
         x,
         y,
         width,
@@ -143,7 +150,7 @@ unsafe fn create_form(hwnd: HWND) {
         hwnd,
         w!("EDIT"),
         "",
-        WS_BORDER | ES_AUTOHSCROLL,
+        WS_BORDER.0 | ES_AUTOHSCROLL as u32,
         320,
         14,
         70,
@@ -163,20 +170,20 @@ unsafe fn create_form(hwnd: HWND) {
     );
 
     label(hwnd, "Highlight color", 20, 58, 110);
-    let _ = control(hwnd, w!("EDIT"), "", WS_BORDER | ES_AUTOHSCROLL, 130, 54, 100, 25, ID_ACCENT);
+    let _ = control(hwnd, w!("EDIT"), "", WS_BORDER.0 | ES_AUTOHSCROLL as u32, 130, 54, 100, 25, ID_ACCENT);
     set_text(hwnd, ID_ACCENT, &cfg.accent);
     label(hwnd, "Slice color", 260, 58, 90);
-    let _ = control(hwnd, w!("EDIT"), "", WS_BORDER | ES_AUTOHSCROLL, 350, 54, 100, 25, ID_WHEEL);
+    let _ = control(hwnd, w!("EDIT"), "", WS_BORDER.0 | ES_AUTOHSCROLL as u32, 350, 54, 100, 25, ID_WHEEL);
     set_text(hwnd, ID_WHEEL, &cfg.wheel_color);
     label(hwnd, "Center color", 480, 58, 90);
-    let _ = control(hwnd, w!("EDIT"), "", WS_BORDER | ES_AUTOHSCROLL, 570, 54, 100, 25, ID_HUB);
+    let _ = control(hwnd, w!("EDIT"), "", WS_BORDER.0 | ES_AUTOHSCROLL as u32, 570, 54, 100, 25, ID_HUB);
     set_text(hwnd, ID_HUB, &cfg.hub_color);
 
     let restore = control(
         hwnd,
         w!("BUTTON"),
         "Return pointer to its original position",
-        BS_AUTOCHECKBOX,
+        BS_AUTOCHECKBOX as u32,
         20,
         94,
         290,
@@ -187,7 +194,7 @@ unsafe fn create_form(hwnd: HWND) {
         hwnd,
         w!("BUTTON"),
         "Bring launched app to the foreground",
-        BS_AUTOCHECKBOX,
+        BS_AUTOCHECKBOX as u32,
         340,
         94,
         300,
@@ -219,7 +226,7 @@ unsafe fn create_form(hwnd: HWND) {
             hwnd,
             w!("EDIT"),
             "",
-            WS_BORDER | ES_AUTOHSCROLL,
+            WS_BORDER.0 | ES_AUTOHSCROLL as u32,
             55,
             y,
             155,
@@ -230,7 +237,7 @@ unsafe fn create_form(hwnd: HWND) {
             hwnd,
             w!("EDIT"),
             "",
-            WS_BORDER | ES_AUTOHSCROLL,
+            WS_BORDER.0 | ES_AUTOHSCROLL as u32,
             220,
             y,
             500,
@@ -241,7 +248,7 @@ unsafe fn create_form(hwnd: HWND) {
             hwnd,
             w!("EDIT"),
             "",
-            WS_BORDER | ES_AUTOHSCROLL,
+            WS_BORDER.0 | ES_AUTOHSCROLL as u32,
             730,
             y,
             175,
@@ -252,7 +259,7 @@ unsafe fn create_form(hwnd: HWND) {
             hwnd,
             w!("BUTTON"),
             "Browse...",
-            WINDOW_STYLE(0),
+            0,
             915,
             y,
             85,
@@ -265,8 +272,8 @@ unsafe fn create_form(hwnd: HWND) {
             set_text(hwnd, base + 2, &item.args);
         }
     }
-    let _ = control(hwnd, w!("BUTTON"), "Save settings", BS_DEFPUSHBUTTON, 790, 570, 105, 32, ID_SAVE);
-    let _ = control(hwnd, w!("BUTTON"), "Cancel", WINDOW_STYLE(0), 905, 570, 95, 32, ID_CANCEL);
+    let _ = control(hwnd, w!("BUTTON"), "Save settings", BS_DEFPUSHBUTTON as u32, 790, 570, 105, 32, ID_SAVE);
+    let _ = control(hwnd, w!("BUTTON"), "Cancel", 0, 905, 570, 95, 32, ID_CANCEL);
     label(hwnd, "Changes are saved to your user config and used the next time the wheel opens.", 20, 578, 650);
 }
 
@@ -303,8 +310,8 @@ fn valid_color(value: &str) -> bool {
 unsafe fn save_settings(hwnd: HWND) {
     let mut cfg = SETTINGS_CONFIG.with(|stored| stored.borrow().clone());
     let designs = ["segments", "band", "orbs", "halo", "arc", "disc"];
-    let design_index = SendMessageW(GetDlgItem(hwnd, ID_DESIGN), CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
-    let center_index = SendMessageW(GetDlgItem(hwnd, ID_CENTER), CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    let design_index = SendMessageW(dialog_item(hwnd, ID_DESIGN), CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+    let center_index = SendMessageW(dialog_item(hwnd, ID_CENTER), CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
     let size = text(hwnd, ID_SIZE);
     let colors = [text(hwnd, ID_ACCENT), text(hwnd, ID_WHEEL), text(hwnd, ID_HUB)];
     if size.parse::<u32>().is_err() || colors.iter().any(|color| !valid_color(color)) {
@@ -332,10 +339,10 @@ unsafe fn save_settings(hwnd: HWND) {
     cfg.wheel_color = colors[1].clone();
     cfg.hub_color = colors[2].clone();
     cfg.restore_cursor =
-        SendMessageW(GetDlgItem(hwnd, ID_RESTORE), BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+        SendMessageW(dialog_item(hwnd, ID_RESTORE), BM_GETCHECK, WPARAM(0), LPARAM(0)).0
             == 1;
     cfg.focus_app =
-        SendMessageW(GetDlgItem(hwnd, ID_FOCUS), BM_GETCHECK, WPARAM(0), LPARAM(0)).0
+        SendMessageW(dialog_item(hwnd, ID_FOCUS), BM_GETCHECK, WPARAM(0), LPARAM(0)).0
             == 1;
     cfg.items = (0..MAX_ITEMS)
         .filter_map(|row| {
@@ -358,7 +365,8 @@ unsafe fn save_settings(hwnd: HWND) {
     }
     match config::save(&cfg) {
         Ok(()) => {
-            let launcher = FindWindowW(w!("RadialLauncherWheel"), PCWSTR::null());
+            let launcher = FindWindowW(w!("RadialLauncherWheel"), PCWSTR::null())
+                .unwrap_or_default();
             if !launcher.0.is_null() {
                 let _ = PostMessageW(launcher, WM_RELOAD_CONFIG, WPARAM(0), LPARAM(0));
             }
@@ -454,7 +462,6 @@ pub fn run() {
             return;
         };
         let _ = ShowWindow(window, SW_SHOW);
-        let _ = UpdateWindow(window);
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);

@@ -119,7 +119,7 @@ pub fn start(target: HWND) -> std::io::Result<()> {
                 return;
             };
             let Ok(_hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(hook_proc), module, 0) else {
-                super::util::message_box("Radial Launcher", "Could not install the mouse hook.");
+                super::message_box("Radial Launcher", "Could not install the mouse hook.");
                 return;
             };
             // A low-level hook needs a message loop on the thread that installed it.

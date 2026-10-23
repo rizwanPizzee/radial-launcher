@@ -1,0 +1,23 @@
+[package]
+name = "radial-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Settings window for Radial Launcher (opened on demand, not resident)"
+
+[[bin]]
+name = "radial-settings"
+path = "src/main.rs"
+
+[dependencies]
+radial-core = { path = "../core" }
+tiny-skia.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11"] }
+
+[features]
+# Pure-Rust text for previews on non-Windows hosts (Windows uses GDI).
+fontdue-text = ["radial-core/fontdue-text", "tiny-skia/png-format"]
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

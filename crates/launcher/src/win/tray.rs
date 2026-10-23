@@ -1,7 +1,9 @@
 //! Notification-area icon and its right-click menu.
 
-use super::util::wide;
-use radial_launcher::wheel;
+use super::wide;
+use radial_core::color::Color;
+use radial_core::wheel;
+use radial_core::win::pcwstr;
 use std::ffi::c_void;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, POINT};
@@ -14,14 +16,15 @@ const TRAY_ID: u32 = 1;
 
 pub const CMD_ENABLED: u32 = 1;
 pub const CMD_SETTINGS: u32 = 2;
-pub const CMD_RELOAD: u32 = 3;
-pub const CMD_AUTOSTART: u32 = 4;
-pub const CMD_QUIT: u32 = 5;
+pub const CMD_AUTOSTART: u32 = 3;
+pub const CMD_EDIT: u32 = 4;
+pub const CMD_RELOAD: u32 = 5;
+pub const CMD_QUIT: u32 = 6;
 
 /// Build an HICON from the wheel glyph. The caller owns the handle.
-unsafe fn make_icon(accent: [u8; 3]) -> HICON {
+unsafe fn make_icon(accent: Color) -> HICON {
     let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
-    let glyph = wheel::render_glyph(size, accent);
+    let glyph = wheel::tray_glyph(size, accent);
 
     let mut bi = BITMAPINFO::default();
     bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -32,8 +35,7 @@ unsafe fn make_icon(accent: [u8; 3]) -> HICON {
     bi.bmiHeader.biCompression = BI_RGB.0;
 
     let mut bits: *mut c_void = std::ptr::null_mut();
-    let Ok(color) = CreateDIBSection(HDC::default(), &bi, DIB_RGB_COLORS, &mut bits, None, 0)
-    else {
+    let Ok(color) = CreateDIBSection(HDC::default(), &bi, DIB_RGB_COLORS, &mut bits, None, 0) else {
         return HICON::default();
     };
     if !bits.is_null() {
@@ -41,42 +43,24 @@ unsafe fn make_icon(accent: [u8; 3]) -> HICON {
         for (s, d) in glyph.data().chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
             // tiny-skia is premultiplied RGBA; icons want straight-alpha BGRA.
             let a = s[3] as u32;
-            let un = |c: u8| {
-                if a == 0 {
-                    0
-                } else {
-                    ((c as u32 * 255 + a / 2) / a).min(255) as u8
-                }
-            };
+            let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
             d[0] = un(s[2]);
             d[1] = un(s[1]);
             d[2] = un(s[0]);
             d[3] = s[3];
         }
     }
-    let mask_bytes = vec![0u8; (((size + 15) / 16) * 2 * size) as usize];
-    let mask = CreateBitmap(
-        size as i32,
-        size as i32,
-        1,
-        1,
-        Some(mask_bytes.as_ptr() as *const c_void),
-    );
+    let mask_bytes = vec![0u8; (size.div_ceil(16) * 2 * size) as usize];
+    let mask = CreateBitmap(size as i32, size as i32, 1, 1, Some(mask_bytes.as_ptr() as *const c_void));
 
-    let info = ICONINFO {
-        fIcon: true.into(),
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask,
-        hbmColor: color,
-    };
+    let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
     let icon = CreateIconIndirect(&info).unwrap_or_default();
     let _ = DeleteObject(HGDIOBJ(color.0));
     let _ = DeleteObject(HGDIOBJ(mask.0));
     icon
 }
 
-pub unsafe fn add(hwnd: HWND, accent: [u8; 3]) {
+pub unsafe fn add(hwnd: HWND, accent: Color) {
     let icon = make_icon(accent);
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -87,11 +71,7 @@ pub unsafe fn add(hwnd: HWND, accent: [u8; 3]) {
         hIcon: icon,
         ..Default::default()
     };
-    for (i, c) in "Radial Launcher (Shift + Middle mouse)"
-        .encode_utf16()
-        .take(127)
-        .enumerate()
-    {
+    for (i, c) in "Radial Launcher (Shift + Middle mouse)".encode_utf16().take(127).enumerate() {
         nid.szTip[i] = c;
     }
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
@@ -111,20 +91,26 @@ pub unsafe fn remove(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
+/// Re-create the icon (used when the accent colour changes).
+pub unsafe fn refresh(hwnd: HWND, accent: Color) {
+    remove(hwnd);
+    add(hwnd, accent);
+}
+
 /// Show the context menu at the pointer; returns the chosen command (0 = none).
 pub unsafe fn show_menu(hwnd: HWND, enabled: bool, autostart: bool) -> u32 {
-    let Ok(menu) = CreatePopupMenu() else {
-        return 0;
-    };
+    let Ok(menu) = CreatePopupMenu() else { return 0 };
     let item = |id: u32, text: &str, checked: bool| {
         let t = wide(text);
         let flags = MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, flags, id as usize, PCWSTR(t.as_ptr()));
+        let _ = AppendMenuW(menu, flags, id as usize, pcwstr(&t));
     };
+    item(CMD_SETTINGS, "Settings...", false);
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     item(CMD_ENABLED, "Enabled", enabled);
     item(CMD_AUTOSTART, "Start with Windows", autostart);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    item(CMD_SETTINGS, "Settings...", false);
+    item(CMD_EDIT, "Open config file", false);
     item(CMD_RELOAD, "Reload config", false);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     item(CMD_QUIT, "Quit", false);
@@ -133,15 +119,7 @@ pub unsafe fn show_menu(hwnd: HWND, enabled: bool, autostart: bool) -> u32 {
     let _ = GetCursorPos(&mut pt);
     // Required so the menu closes when the user clicks elsewhere.
     let _ = SetForegroundWindow(hwnd);
-    let cmd = TrackPopupMenu(
-        menu,
-        TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-        pt.x,
-        pt.y,
-        0,
-        hwnd,
-        None,
-    );
+    let cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, None);
     let _ = PostMessageW(hwnd, WM_NULL, None, None);
     let _ = DestroyMenu(menu);
     cmd.0 as u32

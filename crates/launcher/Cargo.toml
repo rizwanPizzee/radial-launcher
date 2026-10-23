@@ -1,0 +1,17 @@
+[package]
+name = "radial-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tiny always-on radial app launcher for Windows (hold Shift + Middle mouse button)"
+
+[[bin]]
+name = "radial-launcher"
+path = "src/main.rs"
+
+[dependencies]
+radial-core = { path = "../core" }
+tiny-skia.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

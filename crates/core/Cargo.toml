@@ -1,0 +1,30 @@
+[package]
+name = "radial-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Config, themes, wheel styles and rendering shared by the launcher and the settings app"
+
+[lib]
+name = "radial_core"
+
+[features]
+# Pure-Rust text rasteriser used for previews/tests on non-Windows hosts.
+# Windows builds use GDI instead, so this stays off there (smaller exe).
+fontdue-text = ["dep:fontdue"]
+
+[dependencies]
+tiny-skia.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+fontdue = { version = "0.9", default-features = false, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[dev-dependencies]
+tiny-skia = { version = "0.11", features = ["png-format"] }
+
+[[example]]
+name = "preview"
+required-features = ["fontdue-text"]

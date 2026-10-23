@@ -13,4 +13,4 @@ pub mod wheel;
 pub mod win;
 
 /// Edge length (px) of the square icon bitmaps kept in the icon cache and in a session.
-pub const ICON_PX: u32 = 96;
+pub const ICON_PX: u32 = 128;

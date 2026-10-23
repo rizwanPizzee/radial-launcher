@@ -34,6 +34,7 @@ mod imp;
 #[cfg(not(windows))]
 mod imp {
     use super::*;
+    use radial_core::config::ItemConfig;
     use radial_core::text::TextRenderer;
     use tiny_skia::Pixmap;
 
@@ -43,7 +44,7 @@ mod imp {
             Session
         }
     }
-    pub fn text_renderer() -> Box<dyn TextRenderer> {
+    pub fn text_renderer(_face: &str) -> Box<dyn TextRenderer> {
         #[cfg(feature = "fontdue-text")]
         if let Some(t) = radial_core::text::FontdueText::from_files(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -59,7 +60,31 @@ mod imp {
         }
         Box::new(NoText)
     }
-    pub fn load_icon(_path: &str) -> Option<Pixmap> {
+    /// Development stand-in: only PNG pictures can be loaded here (no shell icons off Windows).
+    pub fn load_icon(item: &ItemConfig) -> Option<Pixmap> {
+        #[cfg(feature = "fontdue-text")]
+        if item.has_custom_icon() {
+            let pm = Pixmap::load_png(item.icon.trim()).ok()?;
+            return Some(radial_core::iconcache::fit_icon(&pm));
+        }
+        let _ = item;
+        None
+    }
+    pub fn font_families() -> Vec<String> {
+        ["Arial", "Bahnschrift", "Calibri", "Cascadia Code", "Consolas", "Georgia", "Segoe UI", "Tahoma", "Verdana"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+    pub fn pick_image() -> Option<String> {
+        None
+    }
+    /// A settings file to import.
+    pub fn pick_settings_file() -> Option<String> {
+        None
+    }
+    /// Where to save an exported settings file.
+    pub fn pick_save_settings(_default_name: &str) -> Option<String> {
         None
     }
     pub fn system_fonts() -> Vec<(String, Vec<u8>)> {

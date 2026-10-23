@@ -13,11 +13,23 @@ use windows::Win32::Graphics::Gdi::*;
 
 pub struct GdiText {
     dc: HDC,
+    /// NUL-terminated font family name.
+    face: Vec<u16>,
 }
+
+/// Used when no font is configured.
+pub const DEFAULT_FACE: &str = "Segoe UI";
 
 impl GdiText {
     pub fn new() -> GdiText {
-        GdiText { dc: unsafe { CreateCompatibleDC(HDC::default()) } }
+        GdiText::with_face(DEFAULT_FACE)
+    }
+
+    /// Draw with the installed font family `face` (empty = Segoe UI). Windows substitutes a
+    /// default font when the family is not installed.
+    pub fn with_face(face: &str) -> GdiText {
+        let face = if face.trim().is_empty() { DEFAULT_FACE } else { face.trim() };
+        GdiText { dc: unsafe { CreateCompatibleDC(HDC::default()) }, face: wide(face) }
     }
 }
 
@@ -43,7 +55,6 @@ impl TextRenderer for GdiText {
             return None;
         }
         unsafe {
-            let face = wide("Segoe UI");
             let font = CreateFontW(
                 -(px.round().max(6.0) as i32),
                 0,
@@ -58,7 +69,7 @@ impl TextRenderer for GdiText {
                 CLIP_DEFAULT_PRECIS.0 as u32,
                 ANTIALIASED_QUALITY.0 as u32,
                 0,
-                pcwstr(&face),
+                pcwstr(&self.face),
             );
             if font.is_invalid() {
                 return None;

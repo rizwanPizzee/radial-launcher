@@ -8,9 +8,10 @@ use crate::color::Color;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub const MAX_ITEMS: usize = 12;
 /// Special `path` value: opens the settings app instead of launching a program.
 pub const SETTINGS_ACTION: &str = "@settings";
+/// Slices per page unless the user changes it.
+pub const DEFAULT_PAGE_SIZE: u32 = 12;
 
 // ------------------------------------------------------------------ style
 
@@ -206,6 +207,57 @@ impl Theme {
     }
 }
 
+// ------------------------------------------------------------------ trigger
+
+/// Mouse button that opens the wheel (together with [`Modifier`]).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Button {
+    #[default]
+    Middle,
+    /// Side button towards the back ("back" in browsers).
+    X1,
+    /// Side button towards the front ("forward" in browsers).
+    X2,
+}
+
+impl Button {
+    pub const ALL: [Button; 3] = [Button::Middle, Button::X1, Button::X2];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Button::Middle => "Middle button",
+            Button::X1 => "Side button 1 (back)",
+            Button::X2 => "Side button 2 (forward)",
+        }
+    }
+}
+
+/// Keyboard key that must be held together with the button.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Modifier {
+    #[default]
+    Shift,
+    Ctrl,
+    Alt,
+    /// No key needed. Not allowed with the middle button (it would break normal middle-clicks).
+    None,
+}
+
+impl Modifier {
+    pub const ALL: [Modifier; 4] = [Modifier::Shift, Modifier::Ctrl, Modifier::Alt, Modifier::None];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Modifier::Shift => "Shift",
+            Modifier::Ctrl => "Ctrl",
+            Modifier::Alt => "Alt",
+            Modifier::None => "no key",
+        }
+    }
+}
+
 // ------------------------------------------------------------------ items
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -220,6 +272,11 @@ pub struct ItemConfig {
     pub path: String,
     /// Optional command-line arguments.
     pub args: String,
+    /// Optional picture to show instead of the app's own icon: a PNG, ICO, JPG, BMP... file,
+    /// or an .exe/.dll to take the icon from.
+    pub icon: String,
+    /// Ask Windows to run it as administrator (shows the UAC prompt).
+    pub admin: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +287,20 @@ pub enum Builtin {
 impl ItemConfig {
     pub fn new(name: &str, path: &str) -> Self {
         ItemConfig { name: name.into(), path: path.into(), ..Default::default() }
+    }
+
+    /// What the icon is taken from: the custom picture if one is set, otherwise the target itself.
+    pub fn icon_source(&self) -> &str {
+        let icon = self.icon.trim();
+        if icon.is_empty() {
+            self.path.trim()
+        } else {
+            icon
+        }
+    }
+
+    pub fn has_custom_icon(&self) -> bool {
+        !self.icon.trim().is_empty()
     }
 
     pub fn builtin(&self) -> Option<Builtin> {
@@ -325,7 +396,19 @@ pub struct Config {
     pub tap_ms: u32,
     /// Bring a launched app to the front when Windows opens it behind other windows.
     pub focus_launched: bool,
-    /// 1 to 12 entries, clockwise from the top.
+    /// Font family for the wheel's text. Empty = Segoe UI.
+    pub font: String,
+    /// Mouse button and key that open the wheel.
+    pub trigger_button: Button,
+    pub trigger_key: Modifier,
+    /// Slices shown at once. More items are split over pages that the mouse wheel flips
+    /// through while the wheel is open. 0 = everything on one wheel.
+    pub page_size: u32,
+    /// Switch the hook off while a full-screen app or game is in front.
+    pub pause_in_fullscreen: bool,
+    /// The settings window uses the wheel's colours.
+    pub settings_follow_theme: bool,
+    /// Any number of entries, clockwise from the top.
     pub items: Vec<ItemConfig>,
 
     /// Read from files written by version 1 only; never written back.
@@ -351,6 +434,12 @@ impl Default for Config {
             return_cursor: false,
             tap_ms: 250,
             focus_launched: true,
+            font: String::new(),
+            trigger_button: Button::Middle,
+            trigger_key: Modifier::Shift,
+            page_size: DEFAULT_PAGE_SIZE,
+            pause_in_fullscreen: false,
+            settings_follow_theme: true,
             items: vec![
                 ItemConfig::new("Notepad", "%SystemRoot%\\System32\\notepad.exe"),
                 ItemConfig::new("Calculator", "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
@@ -363,7 +452,7 @@ impl Default for Config {
                     name: "Radial Settings".into(),
                     description: "Change the look and the apps".into(),
                     path: SETTINGS_ACTION.into(),
-                    args: String::new(),
+                    ..Default::default()
                 },
             ],
             accent: None,
@@ -381,6 +470,50 @@ impl Config {
         self.labels = p.labels;
     }
 
+    /// "Shift + Middle button", for tray tooltips and the settings text.
+    pub fn trigger_label(&self) -> String {
+        match self.trigger_key {
+            Modifier::None => self.trigger_button.label().to_owned(),
+            k => format!("{} + {}", k.label(), self.trigger_button.label()),
+        }
+    }
+
+    /// Number of wheel pages (at least 1).
+    pub fn page_count(&self) -> usize {
+        let n = self.items.len();
+        match self.page_size as usize {
+            0 => 1,
+            p => n.div_ceil(p).max(1),
+        }
+    }
+
+    /// Item indices shown on `page` (clamped to the last page).
+    pub fn page_range(&self, page: usize) -> std::ops::Range<usize> {
+        let n = self.items.len();
+        match self.page_size as usize {
+            0 => 0..n,
+            p => {
+                let page = page.min(self.page_count() - 1);
+                (page * p).min(n)..((page + 1) * p).min(n)
+            }
+        }
+    }
+
+    /// Page that contains item `index`.
+    pub fn page_of(&self, index: usize) -> usize {
+        match self.page_size as usize {
+            0 => 0,
+            p => (index / p).min(self.page_count() - 1),
+        }
+    }
+
+    /// A copy of the config that holds only the items of `page`.
+    pub fn page_config(&self, page: usize) -> Config {
+        let mut c = self.clone();
+        c.items = self.items[self.page_range(page)].to_vec();
+        c
+    }
+
     /// Clamp values into ranges the renderer supports and migrate old settings.
     pub fn sanitized(mut self) -> Self {
         if let Some(hex) = self.accent.take() {
@@ -395,7 +528,15 @@ impl Config {
         self.icon_scale = self.icon_scale.clamp(60, 140);
         self.text_scale = self.text_scale.clamp(70, 140);
         self.tap_ms = self.tap_ms.clamp(100, 600);
-        self.items.truncate(MAX_ITEMS);
+        self.font = self.font.trim().chars().take(64).collect();
+        self.page_size = match self.page_size {
+            0 => 0,
+            n => n.clamp(4, 24),
+        };
+        // A bare middle click must keep working in every other program.
+        if self.trigger_button == Button::Middle && self.trigger_key == Modifier::None {
+            self.trigger_key = Modifier::Shift;
+        }
         if self.center != "cursor" {
             self.center = "screen".into();
         }
@@ -515,6 +656,69 @@ mod tests {
         cfg.set_style(Style::Disc);
         assert!(cfg.labels);
         assert_eq!(cfg.thickness, Style::Disc.preset().thickness);
+    }
+
+    #[test]
+    fn any_number_of_items_is_kept() {
+        let items: Vec<String> = (0..300).map(|i| format!(r#"{{ "name": "A{i}", "path": "x{i}" }}"#)).collect();
+        let cfg = Config::parse(&format!(r#"{{ "items": [{}] }}"#, items.join(","))).unwrap();
+        assert_eq!(cfg.items.len(), 300);
+    }
+
+    #[test]
+    fn paging_splits_items_and_clamps() {
+        let mut cfg = Config::default();
+        cfg.items = (0..30).map(|i| ItemConfig::new(&format!("A{i}"), "x")).collect();
+        cfg.page_size = 12;
+        assert_eq!(cfg.page_count(), 3);
+        assert_eq!(cfg.page_range(0), 0..12);
+        assert_eq!(cfg.page_range(2), 24..30);
+        assert_eq!(cfg.page_range(99), 24..30);
+        assert_eq!((cfg.page_of(0), cfg.page_of(11), cfg.page_of(12), cfg.page_of(29)), (0, 0, 1, 2));
+        assert_eq!(cfg.page_config(1).items[0].name, "A12");
+        cfg.page_size = 0;
+        assert_eq!((cfg.page_count(), cfg.page_range(5), cfg.page_of(20)), (1, 0..30, 0));
+        cfg.items.clear();
+        assert_eq!((cfg.page_count(), cfg.page_range(0)), (1, 0..0));
+        let c = Config::parse(r#"{ "page_size": 2 }"#).unwrap();
+        assert_eq!(c.page_size, 4);
+        assert_eq!(Config::parse(r#"{ "page_size": 99 }"#).unwrap().page_size, 24);
+        assert_eq!(Config::parse(r#"{ "page_size": 0 }"#).unwrap().page_size, 0);
+    }
+
+    #[test]
+    fn trigger_never_hijacks_plain_middle_clicks() {
+        let c = Config::parse(r#"{ "trigger_button": "middle", "trigger_key": "none" }"#).unwrap();
+        assert_eq!(c.trigger_key, Modifier::Shift);
+        let c = Config::parse(r#"{ "trigger_button": "x1", "trigger_key": "none" }"#).unwrap();
+        assert_eq!((c.trigger_button, c.trigger_key), (Button::X1, Modifier::None));
+        assert!(Config::parse(r#"{ "trigger_button": "left" }"#).is_err());
+    }
+
+    #[test]
+    fn trigger_label_reads_naturally() {
+        let mut c = Config::default();
+        assert_eq!(c.trigger_label(), "Shift + Middle button");
+        c.trigger_button = Button::X1;
+        c.trigger_key = Modifier::None;
+        assert_eq!(c.trigger_label(), "Side button 1 (back)");
+    }
+
+    #[test]
+    fn icon_source_prefers_the_custom_picture() {
+        let mut it = ItemConfig::new("x", " C:\\a.exe ");
+        assert_eq!(it.icon_source(), "C:\\a.exe");
+        assert!(!it.has_custom_icon());
+        it.icon = " D:\\pic.png ".into();
+        assert_eq!(it.icon_source(), "D:\\pic.png");
+        assert!(it.has_custom_icon());
+    }
+
+    #[test]
+    fn old_files_without_new_fields_still_load() {
+        let cfg = Config::parse(r#"{ "items": [ { "name": "A", "path": "x" } ] }"#).unwrap();
+        assert_eq!((cfg.font.as_str(), cfg.page_size, cfg.settings_follow_theme), ("", 12, true));
+        assert!(!cfg.items[0].admin && cfg.items[0].icon.is_empty());
     }
 
     #[test]

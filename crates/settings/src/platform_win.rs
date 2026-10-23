@@ -3,7 +3,8 @@
 use super::{CommandExt, StartApp};
 use radial_core::text::TextRenderer;
 use radial_core::win::gdi_text::GdiText;
-use radial_core::win::{autostart, icons, ipc, pcwstr, wide};
+use radial_core::config::ItemConfig;
+use radial_core::win::{autostart, fonts, icons, ipc, pcwstr, wide};
 use std::ffi::c_void;
 use tiny_skia::Pixmap;
 use windows::core::{w, PCWSTR};
@@ -12,7 +13,8 @@ use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC
 use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_NODEREFERENCELINKS, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem, FOS_FORCEFILESYSTEM,
+    FOS_NODEREFERENCELINKS, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -31,12 +33,17 @@ impl Session {
     }
 }
 
-pub fn text_renderer() -> Box<dyn TextRenderer> {
-    Box::new(GdiText::new())
+pub fn text_renderer(face: &str) -> Box<dyn TextRenderer> {
+    Box::new(GdiText::with_face(face))
 }
 
-pub fn load_icon(path: &str) -> Option<Pixmap> {
-    icons::load_icon(path)
+/// The icon the wheel will show for `item` (its custom picture, or the target's own icon).
+pub fn load_icon(item: &ItemConfig) -> Option<Pixmap> {
+    icons::load_for_item(item)
+}
+
+pub fn font_families() -> Vec<String> {
+    fonts::installed_families()
 }
 
 /// Fonts to add behind egui's built-in one: Segoe UI covers Arabic, Cyrillic, Greek and more,
@@ -49,36 +56,90 @@ pub fn system_fonts() -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
-fn pick(folder: bool) -> Option<String> {
+#[derive(Clone, Copy)]
+enum Kind {
+    Program,
+    Folder,
+    Image,
+    Settings,
+}
+
+unsafe fn path_of(item: &IShellItem) -> Option<String> {
+    let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+    let path = name.to_string().ok();
+    CoTaskMemFree(Some(name.0 as *const c_void));
+    path
+}
+
+fn pick(kind: Kind) -> Option<String> {
     unsafe {
         let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
         let mut opts = dlg.GetOptions().ok()? | FOS_FORCEFILESYSTEM | FOS_NODEREFERENCELINKS;
-        if folder {
+        if matches!(kind, Kind::Folder) {
             opts |= FOS_PICKFOLDERS;
         }
         dlg.SetOptions(opts).ok()?;
-        if !folder {
-            let specs = [
-                COMDLG_FILTERSPEC { pszName: w!("Programs and shortcuts"), pszSpec: w!("*.exe;*.lnk;*.bat;*.cmd;*.msc") },
-                COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
-            ];
-            dlg.SetFileTypes(&specs).ok()?;
+        match kind {
+            Kind::Program => {
+                let specs = [
+                    COMDLG_FILTERSPEC { pszName: w!("Programs and shortcuts"), pszSpec: w!("*.exe;*.lnk;*.bat;*.cmd;*.msc") },
+                    COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+                ];
+                dlg.SetFileTypes(&specs).ok()?;
+            }
+            Kind::Image => {
+                let specs = [
+                    COMDLG_FILTERSPEC {
+                        pszName: w!("Pictures and icons"),
+                        pszSpec: w!("*.png;*.ico;*.jpg;*.jpeg;*.bmp;*.gif;*.webp;*.tif;*.tiff;*.exe;*.dll"),
+                    },
+                    COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+                ];
+                dlg.SetFileTypes(&specs).ok()?;
+            }
+            Kind::Settings => {
+                let specs = [
+                    COMDLG_FILTERSPEC { pszName: w!("Radial Launcher settings"), pszSpec: w!("*.json") },
+                    COMDLG_FILTERSPEC { pszName: w!("All files"), pszSpec: w!("*.*") },
+                ];
+                dlg.SetFileTypes(&specs).ok()?;
+            }
+            Kind::Folder => {}
         }
         dlg.Show(GetActiveWindow()).ok()?;
-        let item = dlg.GetResult().ok()?;
-        let name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-        let path = name.to_string().ok();
-        CoTaskMemFree(Some(name.0 as *const c_void));
-        path
+        path_of(&dlg.GetResult().ok()?)
     }
 }
 
 pub fn pick_file() -> Option<String> {
-    pick(false)
+    pick(Kind::Program)
 }
 
 pub fn pick_folder() -> Option<String> {
-    pick(true)
+    pick(Kind::Folder)
+}
+
+pub fn pick_image() -> Option<String> {
+    pick(Kind::Image)
+}
+
+/// A settings file to import.
+pub fn pick_settings_file() -> Option<String> {
+    pick(Kind::Settings)
+}
+
+/// Where to save an exported settings file.
+pub fn pick_save_settings(default_name: &str) -> Option<String> {
+    unsafe {
+        let dlg: IFileSaveDialog = CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let specs = [COMDLG_FILTERSPEC { pszName: w!("Radial Launcher settings"), pszSpec: w!("*.json") }];
+        dlg.SetFileTypes(&specs).ok()?;
+        dlg.SetDefaultExtension(w!("json")).ok()?;
+        let name = wide(default_name);
+        dlg.SetFileName(pcwstr(&name)).ok()?;
+        dlg.Show(GetActiveWindow()).ok()?;
+        path_of(&dlg.GetResult().ok()?)
+    }
 }
 
 /// Installed apps from the Start menu (classic and Store apps) via PowerShell's `Get-StartApps`.

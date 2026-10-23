@@ -16,7 +16,8 @@ mod tray;
 
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use radial_core::config::{self, Builtin, Config};
@@ -33,7 +34,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{
+    SHQueryUserNotificationState, ShellExecuteW, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use hook::*;
@@ -42,6 +45,7 @@ const TIMER_FADE: usize = 1;
 const TIMER_KEYS: usize = 2;
 const TIMER_TRIM: usize = 3;
 const TIMER_FOCUS: usize = 4;
+const TIMER_FULLSCREEN: usize = 5;
 
 /// Safety net: a wheel left open this long closes itself.
 const MAX_OPEN: Duration = Duration::from_secs(60);
@@ -49,6 +53,8 @@ const MAX_OPEN: Duration = Duration::from_secs(60);
 const FOCUS_TICKS: u32 = 35;
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// Fingerprint of the icon set the helper was last started for (see `iconcache::signature`).
+static LAST_REFRESH_SIG: AtomicU64 = AtomicU64::new(0);
 
 pub fn message_box(title: &str, text: &str) {
     let (t, c) = (wide(title), wide(text));
@@ -69,7 +75,15 @@ struct Open {
     origin: POINT,
     centre: POINT,
     return_to: Option<POINT>,
+    /// Hovered slice on the current page.
     hovered: Option<usize>,
+    /// Current page, how many there are, the index of its first item, and the last pointer
+    /// position (to re-test the hover after a page flip).
+    page: usize,
+    pages: usize,
+    page_start: usize,
+    pointer: POINT,
+    scroll_acc: i32,
     opened: Instant,
     sticky: bool,
     /// Fade-in progress 0..=255 and the final opacity.
@@ -106,9 +120,16 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 
 /// `radial-launcher --refresh-icons`: rebuild the icon cache, tell the running launcher, exit.
 pub fn refresh_icons_and_exit() {
+    unsafe {
+        // Touching the message queue tells Windows this process has started, which ends the
+        // "working in background" cursor it shows while a new program starts.
+        let mut msg = MSG::default();
+        let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+    }
     if let Ok(cfg) = config::load_or_create() {
+        // No reload message afterwards: the launcher reads the cache each time the wheel opens,
+        // and telling it to reload is what used to start this helper again (a loop).
         let _ = shell_icons::refresh_cache(&cfg);
-        ipc::notify_launcher_reload();
     }
 }
 
@@ -131,7 +152,11 @@ pub fn run() {
             }
         };
         let accent = cfg.theme.hover;
-        let stale = iconcache::is_stale(&cfg);
+        let tip = format!("Radial Launcher ({})", cfg.trigger_label());
+        let boot = (cfg.trigger_button, cfg.trigger_key, cfg.pause_in_fullscreen);
+        if iconcache::is_stale(&cfg) {
+            spawn_icon_refresh_once(&cfg);
+        }
         APP.with(|a| *a.borrow_mut() = Some(App { cfg, open: None, focus: None }));
 
         let hinstance: HINSTANCE = GetModuleHandleW(None).map(Into::into).unwrap_or_default();
@@ -165,14 +190,12 @@ pub fn run() {
         };
 
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Relaxed);
-        tray::add(hwnd, accent);
+        tray::add(hwnd, accent, &tip);
+        apply_runtime(hwnd, boot.0, boot.1, boot.2);
         if hook::start(hwnd).is_err() {
             message_box("Radial Launcher", "Could not start the mouse hook thread.");
             tray::remove(hwnd);
             return;
-        }
-        if stale {
-            spawn_icon_refresh();
         }
         SetTimer(hwnd, TIMER_TRIM, 3000, None);
 
@@ -185,10 +208,36 @@ pub fn run() {
     }
 }
 
-fn spawn_icon_refresh() {
+/// Start the icon helper, but only once for each distinct set of icons: if an icon cannot be
+/// extracted the cache stays "stale" forever, and retrying would loop.
+fn spawn_icon_refresh_once(cfg: &Config) {
+    let sig = iconcache::signature(cfg);
+    if LAST_REFRESH_SIG.swap(sig, Relaxed) == sig {
+        return;
+    }
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).arg("--refresh-icons").spawn();
     }
+}
+
+/// Apply the settings that live outside the config struct: the hook's trigger and the
+/// full-screen check (a 2 s timer that exists only while that option is on).
+unsafe fn apply_runtime(hwnd: HWND, button: config::Button, key: config::Modifier, pause_fullscreen: bool) {
+    hook::set_trigger(button, key);
+    if pause_fullscreen {
+        update_fullscreen();
+        SetTimer(hwnd, TIMER_FULLSCREEN, 2000, None);
+    } else {
+        let _ = KillTimer(hwnd, TIMER_FULLSCREEN);
+        PAUSED.store(false, Relaxed);
+    }
+}
+
+unsafe fn update_fullscreen() {
+    let busy = SHQueryUserNotificationState()
+        .map(|s| s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE)
+        .unwrap_or(false);
+    PAUSED.store(busy, Relaxed);
 }
 
 /// Give back every page of memory the OS can take: they are faulted in again on demand, so the
@@ -256,11 +305,8 @@ unsafe fn open_wheel(app: &mut App, hwnd: HWND) {
     let previous = SelectObject(mem_dc, HGDIOBJ(bitmap.0));
 
     // Icons come from the cache file and live only as long as this session.
-    let mut text = GdiText::new();
-    let cache = iconcache::read(&iconcache::cache_path()).unwrap_or_default();
-    let icons = pick_icons(&app.cfg, &mut text, |it| cache.get(&iconcache::key_for(&it.path)).cloned());
-    drop(cache);
-    let session = Session::new(&app.cfg, size, icons, &mut text);
+    let mut text = GdiText::with_face(&app.cfg.font);
+    let session = build_session(&app.cfg, size, 0, &mut text);
 
     let mut open = Open {
         session,
@@ -274,6 +320,11 @@ unsafe fn open_wheel(app: &mut App, hwnd: HWND) {
         centre,
         return_to: (screen_mode && app.cfg.return_cursor).then_some(cursor),
         hovered: None,
+        page: 0,
+        pages: app.cfg.page_count(),
+        page_start: 0,
+        pointer: if screen_mode { centre } else { cursor },
+        scroll_acc: 0,
         opened: Instant::now(),
         sticky: false,
         fade: if app.cfg.animation { 0 } else { 255 },
@@ -291,6 +342,16 @@ unsafe fn open_wheel(app: &mut App, hwnd: HWND) {
     }
     SetTimer(hwnd, TIMER_KEYS, 40, None);
     app.open = Some(open);
+}
+
+/// The wheel for one page: loads only that page's icons from the cache and builds the names.
+fn build_session(cfg: &Config, size: u32, page: usize, text: &mut GdiText) -> Session {
+    let page_cfg = cfg.page_config(page);
+    let wanted: HashSet<u64> = page_cfg.items.iter().filter_map(iconcache::item_key).collect();
+    let cache = iconcache::read_filtered(&iconcache::cache_path(), |k| wanted.contains(&k)).unwrap_or_default();
+    let icons = pick_icons(&page_cfg, text, |it| iconcache::item_key(it).and_then(|k| cache.get(&k)).cloned());
+    drop(cache);
+    Session::new(&page_cfg, size, icons, text).with_page(page, cfg.page_count())
 }
 
 /// Render the wheel and copy it into the DIB.
@@ -349,19 +410,43 @@ unsafe fn close_wheel(app: &mut App, hwnd: HWND, launch: bool) -> Option<usize> 
     ACTIVE.store(false, Relaxed);
     SetTimer(hwnd, TIMER_TRIM, 1500, None);
 
-    let chosen = if launch { o.hovered } else { None };
+    let chosen = if launch { o.hovered.map(|h| o.page_start + h) } else { None };
     // `o` (session, icons, text renderer, render buffer) is dropped here.
     chosen
 }
 
 unsafe fn on_move(app: &mut App, hwnd: HWND, x: i32, y: i32) {
     let Some(o) = app.open.as_mut() else { return };
+    o.pointer = POINT { x, y };
     let hit = o.session.hit_test((x - o.centre.x) as f32, (y - o.centre.y) as f32);
     if hit != o.hovered {
         o.hovered = hit;
         redraw(o);
         commit(hwnd, o);
     }
+}
+
+/// Mouse wheel while the wheel is open: flip to the next/previous page (wraps around).
+unsafe fn on_scroll(app: &mut App, hwnd: HWND, delta: i32) {
+    let App { cfg, open, .. } = app;
+    let Some(o) = open.as_mut() else { return };
+    if o.pages <= 1 {
+        return;
+    }
+    // One notch is 120; smooth-scrolling wheels and touchpads send smaller steps that add up.
+    o.scroll_acc += delta;
+    if o.scroll_acc.abs() < 120 {
+        return;
+    }
+    let forward = o.scroll_acc < 0;
+    o.scroll_acc = 0;
+    o.page = if forward { (o.page + 1) % o.pages } else { (o.page + o.pages - 1) % o.pages };
+    o.page_start = cfg.page_range(o.page).start;
+    let size = o.session.layout().size;
+    o.session = build_session(cfg, size, o.page, &mut o.text);
+    o.hovered = o.session.hit_test((o.pointer.x - o.centre.x) as f32, (o.pointer.y - o.centre.y) as f32);
+    redraw(o);
+    commit(hwnd, o);
 }
 
 unsafe fn on_middle_up(app: &mut App, hwnd: HWND) -> Option<usize> {
@@ -405,6 +490,7 @@ unsafe fn on_timer(app: &mut App, hwnd: HWND, id: usize) {
             }
         }
         TIMER_FOCUS => on_focus_tick(app, hwnd),
+        TIMER_FULLSCREEN => update_fullscreen(),
         _ => {}
     }
 }
@@ -433,7 +519,7 @@ unsafe fn launch_index(hwnd: HWND, index: usize) {
     let args = wide(&config::expand_env(&item.args));
     let result = ShellExecuteW(
         None,
-        w!("open"),
+        if item.admin { w!("runas") } else { w!("open") },
         pcwstr(&file),
         if item.args.trim().is_empty() { PCWSTR::null() } else { pcwstr(&args) },
         PCWSTR::null(),
@@ -492,17 +578,18 @@ unsafe fn reload_config(hwnd: HWND, quiet: bool) {
     match config::load_or_create() {
         Ok(cfg) => {
             let accent = cfg.theme.hover;
-            let stale = iconcache::is_stale(&cfg);
+            let tip = format!("Radial Launcher ({})", cfg.trigger_label());
+            apply_runtime(hwnd, cfg.trigger_button, cfg.trigger_key, cfg.pause_in_fullscreen);
+            if iconcache::is_stale(&cfg) {
+                spawn_icon_refresh_once(&cfg);
+            }
             with_app(|app| {
                 if app.open.is_some() {
                     let _ = close_wheel(app, hwnd, false);
                 }
                 app.cfg = cfg;
             });
-            tray::refresh(hwnd, accent);
-            if stale {
-                spawn_icon_refresh();
-            }
+            tray::refresh(hwnd, accent, &tip);
             SetTimer(hwnd, TIMER_TRIM, 1500, None);
         }
         Err(e) if !quiet => message_box("Radial Launcher - config error", &format!("Keeping the previous settings.\n\n{e}")),
@@ -562,10 +649,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             with_app(|a| on_move(a, hwnd, x, y));
             LRESULT(0)
         }
-        WM_WHEEL_MIDDLE_UP => {
+        WM_WHEEL_RELEASE => {
             if let Some(i) = with_app(|a| on_middle_up(a, hwnd)).flatten() {
                 launch_index(hwnd, i);
             }
+            LRESULT(0)
+        }
+        WM_WHEEL_SCROLL => {
+            let delta = wparam.0 as isize as i32;
+            with_app(|a| on_scroll(a, hwnd, delta));
             LRESULT(0)
         }
         WM_WHEEL_LCLICK => {
@@ -597,21 +689,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         m if m != 0 && m == TASKBAR_CREATED.load(Relaxed) => {
             // Explorer restarted: put the tray icon back.
-            let accent = with_app(|a| a.cfg.theme.hover).unwrap_or_default_color();
-            tray::add(hwnd, accent);
+            let (accent, tip) = with_app(|a| (a.cfg.theme.hover, format!("Radial Launcher ({})", a.cfg.trigger_label())))
+                .unwrap_or((radial_core::config::Theme::midnight().hover, "Radial Launcher".to_owned()));
+            tray::add(hwnd, accent, &tip);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-/// Tiny helper so the "Explorer restarted" path has a colour even if the state is busy.
-trait OrDefaultColor {
-    fn unwrap_or_default_color(self) -> radial_core::color::Color;
-}
-
-impl OrDefaultColor for Option<radial_core::color::Color> {
-    fn unwrap_or_default_color(self) -> radial_core::color::Color {
-        self.unwrap_or(radial_core::config::Theme::midnight().hover)
     }
 }

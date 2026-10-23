@@ -24,31 +24,47 @@ instantly to the running launcher; no restart.
 
 | Action | Result |
 |---|---|
-| Hold **Shift + Middle button** | Wheel opens in the centre of the monitor under the pointer |
+| Hold **Shift + Middle button** (changeable) | Wheel opens in the centre of the monitor under the pointer |
 | Move toward a slice, **release** | Launches it. Releasing over the centre hub cancels |
 | **Quick tap** (shorter than the tap time) | Wheel stays open; **left-click** a slice to launch |
-| **Right-click** or middle-click again | Cancel |
+| **Mouse wheel** while it is open | Flip to the next / previous page (when you have more apps than fit on one wheel) |
+| **Right-click** or press the trigger again | Cancel |
 
 Tray menu: Settings, Enabled (pause the hook, e.g. before a game), Start with Windows,
 Open config file, Reload config, Quit.
 
 ## The settings app
 
-- **Apps** – up to 12 slices. Add from the Start menu list, pick any file or folder with the
-  normal Windows dialog, set name, description and arguments, reorder or remove. Click a
-  slice in the live preview to edit it.
-- **Style** – six wheel designs (Segments, Band, Orbs, Halo, Arc, Disc), theme presets
-  (Midnight, Cream, Crimson, Graphite, Ocean, Forest, Violet, Light), your own colours for
-  background, hub, highlight, text and border, plus size, opacity, ring thickness, gap, icon
-  and text scale. The preview is rendered by the same code as the real wheel (WYSIWYG).
-- **Behavior** – where the wheel opens, tap time, animation, labels, start with Windows,
-  bring-launched-apps-to-front, return pointer.
+The window uses the colours of the wheel you are designing (switch off under Style).
+
+- **Apps**: any number of slices. Add from the Start menu list, pick any file or folder with the
+  normal Windows dialog, add a website, then set name, description, arguments and
+  **Run as administrator**. Reorder, duplicate, sort A-Z, search the list. Click a slice in the
+  live preview to edit it. **Icon**: *Choose picture...* replaces a blurry app icon with your own
+  PNG / ICO / JPG (or an icon from an .exe); *Use app icon* undoes it.
+- **Style**: six wheel designs (Segments, Band, Orbs, Halo, Arc, Disc), theme presets (Midnight,
+  Cream, Crimson, Graphite, Ocean, Forest, Violet, Light), your own colours for background, hub,
+  highlight, text and border, size, opacity, ring thickness, gap, icon and text scale, and the
+  **font** for the names (any installed font, previewed live).
+- **Behavior**: trigger (middle / side button 1 / side button 2, with Shift / Ctrl / Alt / nothing),
+  where the wheel opens, tap time, **pages** (slices per page, or everything on one wheel),
+  bring-launched-apps-to-front, **pause in full-screen apps**, start with Windows,
+  export / import settings.
+
+Many apps: with more than *Slices per page* apps (default 12) the wheel gets pages; the hub shows
+dots for the page and the mouse wheel flips them. Turn paging off to put everything on one ring;
+names are hidden automatically when the slices become too narrow to read.
 
 ![apps](docs/settings-apps.png)
-![style](docs/settings-style.png)
+![dark](docs/settings-dark-theme.png)
 
 ## Fixes in this version
 
+- **"Working in background" cursor and a wheel that never opened.** The launcher started its icon
+  helper whenever an icon was missing, the helper told the launcher to reload, and the reload
+  started the helper again when an icon still could not be read (for example a Store app), in an
+  endless loop that also closed the wheel the moment it opened. Now the helper is started at most
+  once per set of apps, never asks the launcher to reload, and no longer shows the busy cursor.
 - **Launched apps open behind other windows.** The launcher remembers the visible windows,
   grants foreground rights (`AllowSetForegroundWindow` plus a harmless synthetic F24 key
   press, the usual trick to unlock `SetForegroundWindow`), starts the program, then watches
@@ -61,9 +77,9 @@ Open config file, Reload config, Quit.
 
 Goal: keep the always-on part as small as possible. Measures taken:
 
-- **No icons in RAM.** Icons are extracted by the settings app (or by a short-lived
+- **No icons in RAM.** Icons (128 px) are extracted by the settings app (or by a short-lived
   `radial-launcher --refresh-icons` process) into `%LOCALAPPDATA%\RadialLauncher\icons.bin`.
-  The launcher reads that file only while the wheel is open, and frees it on close.
+  The launcher reads only the icons of the page on screen, and only while the wheel is open.
 - **No font loaded.** Text is drawn with Windows GDI (Segoe UI), so no font file sits in RAM.
 - **Buffers freed on close**, and the working set is trimmed a few seconds after start and
   after every close or reload.
@@ -104,6 +120,9 @@ override the folders. Special item path `@settings` opens the settings app.
 - The mouse hook does not see input going to **elevated (admin) windows**; run the launcher
   as admin if you need the wheel over those.
 - Esc is not swallowed; use right-click to cancel.
+- Side buttons set as the trigger without a key stop working as back/forward everywhere.
+- Full-screen detection uses the Windows "busy / game / presentation" state, checked every 2 s, and
+  only while that option is on.
 - Games using exclusive fullscreen may cover the overlay; borderless windowed works.
 
 ## Layout

@@ -7,7 +7,7 @@
 //! resident launcher.
 
 use super::{pcwstr, wide};
-use crate::config::{expand_env, Config};
+use crate::config::{expand_env, Config, ItemConfig};
 use crate::iconcache::{self, fit_icon};
 use crate::ICON_PX;
 use std::ffi::c_void;
@@ -43,11 +43,34 @@ impl Drop for ComGuard {
 /// The shell icon for `path` (environment variables are expanded), fitted to `ICON_PX`.
 /// COM must be initialised on the calling thread (see [`ComGuard`]).
 pub fn load_icon(path: &str) -> Option<Pixmap> {
+    load(path, true)
+}
+
+/// A picture chosen by the user (PNG, JPG, ICO, BMP, GIF...): the shell's thumbnail of the file,
+/// which keeps transparency. Falls back to the file's icon, so an .exe/.dll works too.
+pub fn load_picture(path: &str) -> Option<Pixmap> {
+    load(path, false).or_else(|| load(path, true))
+}
+
+/// The icon the wheel shows for `item`: its custom picture if it has one, otherwise the icon of
+/// the target itself. `None` for built-in actions without a picture.
+pub fn load_for_item(item: &ItemConfig) -> Option<Pixmap> {
+    if item.has_custom_icon() {
+        load_picture(item.icon.trim())
+    } else if item.builtin().is_some() || item.path.trim().is_empty() {
+        None
+    } else {
+        load_icon(&item.path)
+    }
+}
+
+fn load(path: &str, icon_only: bool) -> Option<Pixmap> {
     unsafe {
         let p = wide(&expand_env(path.trim()));
         let factory: IShellItemImageFactory = SHCreateItemFromParsingName(pcwstr(&p), None::<&IBindCtx>).ok()?;
         let px = ICON_PX as i32;
-        let hbm = factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK).ok()?;
+        let flags = if icon_only { SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK } else { SIIGBF_BIGGERSIZEOK };
+        let hbm = factory.GetImage(SIZE { cx: px, cy: px }, flags).ok()?;
         let pixmap = bitmap_to_pixmap(hbm);
         let _ = DeleteObject(HGDIOBJ(hbm.0));
         pixmap.map(|p| fit_icon(&p))
@@ -98,14 +121,11 @@ pub fn refresh_cache(cfg: &Config) -> std::io::Result<usize> {
     let _com = ComGuard::new();
     let mut found: Vec<(u64, Pixmap)> = Vec::new();
     for item in &cfg.items {
-        if item.builtin().is_some() || item.path.trim().is_empty() {
-            continue;
-        }
-        let key = iconcache::key_for(&item.path);
+        let Some(key) = iconcache::item_key(item) else { continue };
         if found.iter().any(|(k, _)| *k == key) {
             continue;
         }
-        if let Some(icon) = load_icon(&item.path) {
+        if let Some(icon) = load_for_item(item) {
             found.push((key, icon));
         }
     }

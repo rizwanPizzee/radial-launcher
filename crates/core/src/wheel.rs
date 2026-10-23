@@ -186,6 +186,10 @@ pub struct Session {
     lay: Layout,
     items: Vec<WheelItem>,
     hub: Vec<Option<HubText>>,
+    /// Names on the slices: off when the setting is off or the slices are too narrow to read.
+    labels_on: bool,
+    page: usize,
+    pages: usize,
 }
 
 /// Choose each item's icon: real icon if the caller has one, gear for built-in settings,
@@ -198,7 +202,8 @@ pub fn pick_icons(
     cfg.items
         .iter()
         .map(|it| match it.builtin() {
-            Some(Builtin::Settings) => gear_icon(cfg.theme.text),
+            Some(Builtin::Settings) if !it.has_custom_icon() => gear_icon(cfg.theme.text),
+            Some(Builtin::Settings) => lookup(it).unwrap_or_else(|| gear_icon(cfg.theme.text)),
             None => lookup(it).unwrap_or_else(|| fallback_icon(tr, &it.name)),
         })
         .collect()
@@ -208,7 +213,15 @@ impl Session {
     /// `icons` must contain one `ICON_PX` square pixmap per configured item.
     pub fn new(cfg: &Config, size_px: u32, icons: Vec<Pixmap>, tr: &mut dyn TextRenderer) -> Session {
         let lay = Layout::new(size_px, cfg.style, cfg.thickness);
-        let show_labels = cfg.labels || cfg.style == Style::Disc;
+        let n = cfg.items.len().max(1) as f32;
+        // Arc length available to one slice where its name sits. Beyond ~20 slices on one
+        // wheel the names would shrink to unreadable specks, so they are dropped (icons stay).
+        let r_label = match cfg.style {
+            Style::Disc => lay.r_in + (lay.r - lay.r_in) * 0.52,
+            _ => (lay.r_in + lay.r) / 2.0,
+        };
+        let readable = TAU * r_label / n >= 58.0 * lay.unit;
+        let show_labels = (cfg.labels || cfg.style == Style::Disc) && readable;
         let label_px = 13.0 * lay.unit * cfg.text_scale as f32 / 100.0 * if cfg.style == Style::Disc { 1.05 } else { 1.0 };
         let max_chars = if cfg.style == Style::Disc { 12 } else { 14 };
 
@@ -224,7 +237,14 @@ impl Session {
             })
             .collect();
         let hub = (0..items.len()).map(|_| None).collect();
-        Session { cfg: cfg.clone(), lay, items, hub }
+        Session { cfg: cfg.clone(), lay, items, hub, labels_on: show_labels, page: 0, pages: 1 }
+    }
+
+    /// Tell the wheel which page it shows; with more than one page it draws page dots in the hub.
+    pub fn with_page(mut self, page: usize, pages: usize) -> Session {
+        self.pages = pages.max(1);
+        self.page = page.min(self.pages - 1);
+        self
     }
 
     pub fn layout(&self) -> &Layout {
@@ -295,6 +315,36 @@ impl Session {
             Style::Halo => self.draw_ring(pm, hovered, RingKind::Halo),
             Style::Orbs => self.draw_orbs(pm, hovered),
             Style::Disc => self.draw_disc(pm, hovered),
+        }
+        if self.pages > 1 {
+            self.draw_page_dots(pm);
+        }
+    }
+
+    /// One dot per page (a small progress bar when there are many pages) at the bottom of the hub.
+    fn draw_page_dots(&self, pm: &mut Pixmap) {
+        let (c, u) = (self.lay.c, self.lay.unit);
+        let hub_r = self.hub_radius();
+        let y = c + hub_r * if self.cfg.style == Style::Disc { 0.40 } else { 0.74 };
+        let col = self.cfg.theme.hub_text;
+        if self.pages <= 10 {
+            let step = 11.0 * u;
+            let x0 = c - step * (self.pages as f32 - 1.0) / 2.0;
+            for i in 0..self.pages {
+                let here = i == self.page;
+                if let Some(p) = circle(x0 + step * i as f32, y, 2.6 * u * if here { 1.3 } else { 1.0 }) {
+                    fill(pm, &p, col.faded(if here { 0.95 } else { 0.32 }));
+                }
+            }
+        } else {
+            let w = (hub_r * 0.9).min(90.0 * u);
+            if let Some(p) = line(c - w / 2.0, y, c + w / 2.0, y) {
+                stroke(pm, &p, col.faded(0.3), 3.0 * u, LineCap::Round);
+            }
+            let x = c - w / 2.0 + w * self.page as f32 / (self.pages - 1) as f32;
+            if let Some(p) = circle(x, y, 4.0 * u) {
+                fill(pm, &p, col.faded(0.95));
+            }
         }
     }
 
@@ -429,25 +479,28 @@ impl Session {
 
         // Icons (and optional names).
         let ring_w = r_out - r_in;
-        let labels = self.cfg.labels && kind != RingKind::Halo;
+        let labels = self.labels_on && kind != RingKind::Halo;
         for i in 0..n {
             let hot = hovered == Some(i);
             let mid = self.mid(i);
-            let mut rm = (r_in + r_out) / 2.0 + if hot { pop / 2.0 } else { 0.0 };
-            let max_arc = TAU * rm / n as f32 * 0.8;
-            let mut target = (ring_w * if kind == RingKind::Halo { 0.62 } else { 0.56 }).min(64.0 * u).min(max_arc) * self.icon_scale();
-            if labels {
-                target = (target * 0.82).min(ring_w * 0.5);
-                rm -= ring_w * 0.14;
-            }
-            draw_icon(pm, &self.items[i].icon, c + rm * mid.cos(), c + rm * mid.sin(), target, self.icon_opacity(hovered, i));
-            if labels {
-                if let Some(lb) = &self.items[i].label {
-                    let rl = (r_in + r_out) / 2.0 + ring_w * 0.28 + if hot { pop / 2.0 } else { 0.0 };
-                    let k = (max_arc / lb.width() as f32).min(1.0);
-                    let (w, h) = (lb.width() as f32 * k, lb.height() as f32 * k);
-                    blit_scaled(pm, lb, c + rl * mid.cos() - w / 2.0, c + rl * mid.sin() - h / 2.0, k);
-                }
+            let rm = (r_in + r_out) / 2.0 + if hot { pop / 2.0 } else { 0.0 };
+            let (cx, cy) = (c + rm * mid.cos(), c + rm * mid.sin());
+            let arc = TAU * rm / n as f32;
+            let label = if labels { self.items[i].label.as_ref() } else { None };
+            if let Some(lb) = label {
+                // Icon above name as one stack centred in the wedge: unlike a name placed further
+                // out along the wedge, it stays inside the slice on every side of the wheel
+                // (side slices are wide radially, top and bottom ones along the arc).
+                let avail = (arc * 0.86).min(ring_w * 0.92);
+                let target = (ring_w * 0.40).min(avail * 0.72).min(64.0 * u) * self.icon_scale();
+                let k = (avail / lb.width() as f32).min(1.0);
+                let gap = 4.0 * u;
+                let top = cy - (target + gap + lb.height() as f32 * k) / 2.0;
+                draw_icon(pm, &self.items[i].icon, cx, top + target / 2.0, target, self.icon_opacity(hovered, i));
+                blit_scaled(pm, lb, cx - lb.width() as f32 * k / 2.0, top + target + gap, k);
+            } else {
+                let target = (ring_w * if kind == RingKind::Halo { 0.62 } else { 0.56 }).min(64.0 * u).min(arc * 0.8) * self.icon_scale();
+                draw_icon(pm, &self.items[i].icon, cx, cy, target, self.icon_opacity(hovered, i));
             }
         }
 
@@ -592,8 +645,22 @@ enum RingKind {
 
 /// Small helper for the settings app: draw a mini preview of `cfg` into a square pixmap.
 pub fn render_preview(cfg: &Config, size_px: u32, icons: Vec<Pixmap>, hovered: Option<usize>, tr: &mut dyn TextRenderer) -> Pixmap {
+    render_preview_page(cfg, size_px, icons, hovered, 0, 1, tr)
+}
+
+/// Like [`render_preview`] for one page of a paged wheel: `cfg` holds that page's items only
+/// (see `Config::page_config`) and the hub shows which page of `pages` this is.
+pub fn render_preview_page(
+    cfg: &Config,
+    size_px: u32,
+    icons: Vec<Pixmap>,
+    hovered: Option<usize>,
+    page: usize,
+    pages: usize,
+    tr: &mut dyn TextRenderer,
+) -> Pixmap {
     let mut pm = Pixmap::new(size_px.max(8), size_px.max(8)).expect("preview size is non-zero");
-    let mut s = Session::new(cfg, size_px.max(8), icons, tr);
+    let mut s = Session::new(cfg, size_px.max(8), icons, tr).with_page(page, pages);
     s.render(&mut pm, hovered, tr);
     pm
 }
@@ -623,6 +690,14 @@ mod tests {
     impl TextRenderer for NoText {
         fn render(&mut self, _: &str, _: f32, _: bool, _: Option<u32>) -> Option<Pixmap> {
             None
+        }
+    }
+
+    /// Text renderer that returns a small block for any text, so label logic can be tested.
+    struct Named;
+    impl TextRenderer for Named {
+        fn render(&mut self, text: &str, _: f32, _: bool, _: Option<u32>) -> Option<Pixmap> {
+            (!text.trim().is_empty()).then(|| Pixmap::new(40, 12).unwrap())
         }
     }
 
@@ -674,7 +749,7 @@ mod tests {
     #[test]
     fn every_style_draws_and_reacts_to_hover_for_all_item_counts() {
         for style in Style::ALL {
-            for n in [1usize, 2, 3, 5, 8, 12] {
+            for n in [1usize, 2, 3, 5, 8, 12, 24, 60, 150] {
                 let mut cfg = Config::default();
                 cfg.set_style(style);
                 cfg.items = (0..n).map(|i| crate::config::ItemConfig::new(&format!("App {i}"), "x")).collect();
@@ -687,6 +762,36 @@ mod tests {
                 assert_ne!(a.data(), b.data(), "{style:?} n={n} hover had no visible effect");
             }
         }
+    }
+
+    #[test]
+    fn crowded_wheels_drop_names_but_keep_icons() {
+        let mut cfg = Config::default();
+        cfg.set_style(Style::Segments);
+        cfg.labels = true;
+        cfg.items = (0..8).map(|i| crate::config::ItemConfig::new(&format!("App {i}"), "x")).collect();
+        assert!(Session::new(&cfg, 520, icons(&cfg), &mut Named).labels_on);
+        cfg.items = (0..60).map(|i| crate::config::ItemConfig::new(&format!("App {i}"), "x")).collect();
+        let s = Session::new(&cfg, 520, icons(&cfg), &mut Named);
+        assert!(!s.labels_on);
+        assert!(s.items.iter().all(|it| it.label.is_none()));
+    }
+
+    #[test]
+    fn page_dots_appear_only_with_several_pages() {
+        let cfg = Config::default();
+        let size = 400;
+        let draw = |page: usize, pages: usize| {
+            let mut s = Session::new(&cfg, size, icons(&cfg), &mut NoText).with_page(page, pages);
+            let mut pm = Pixmap::new(size, size).unwrap();
+            s.render(&mut pm, None, &mut NoText);
+            pm.data().to_vec()
+        };
+        let one = draw(0, 1);
+        assert_ne!(one, draw(0, 3));
+        assert_ne!(draw(0, 3), draw(1, 3));
+        assert_ne!(draw(0, 40), draw(39, 40)); // progress-bar form
+        assert_eq!(draw(5, 1), one); // page index is ignored without pages
     }
 
     #[test]

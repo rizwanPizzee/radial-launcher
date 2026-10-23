@@ -1,5 +1,6 @@
 //! Windows-only helpers shared by the launcher and the settings app.
 pub mod autostart;
+pub mod fonts;
 pub mod gdi_text;
 pub mod icons;
 pub mod ipc;

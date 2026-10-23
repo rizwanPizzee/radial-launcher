@@ -60,7 +60,7 @@ unsafe fn make_icon(accent: Color) -> HICON {
     icon
 }
 
-pub unsafe fn add(hwnd: HWND, accent: Color) {
+pub unsafe fn add(hwnd: HWND, accent: Color, tip: &str) {
     let icon = make_icon(accent);
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -71,7 +71,7 @@ pub unsafe fn add(hwnd: HWND, accent: Color) {
         hIcon: icon,
         ..Default::default()
     };
-    for (i, c) in "Radial Launcher (Shift + Middle mouse)".encode_utf16().take(127).enumerate() {
+    for (i, c) in tip.encode_utf16().take(127).enumerate() {
         nid.szTip[i] = c;
     }
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
@@ -92,9 +92,9 @@ pub unsafe fn remove(hwnd: HWND) {
 }
 
 /// Re-create the icon (used when the accent colour changes).
-pub unsafe fn refresh(hwnd: HWND, accent: Color) {
+pub unsafe fn refresh(hwnd: HWND, accent: Color, tip: &str) {
     remove(hwnd);
-    add(hwnd, accent);
+    add(hwnd, accent, tip);
 }
 
 /// Show the context menu at the pointer; returns the chosen command (0 = none).
